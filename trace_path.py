@@ -173,10 +173,12 @@ for i, im_obj in enumerate(stokesi):
     im = im_obj.imagefile
     # scale data to 54MHz using beta=-0.6
     scale = 1 #(54e6/im_obj.freq)**(-0.8)
-    ax.plot(df['l'], df[f'F_{im}']*scale, color=f'C{i}', label=im.split('/')[-1])
-    ax.fill_between(df['l'], scale*(df[f'F_{im}']-df[f'F_err_{image.freq:.2e}']), scale*(df[f'F_{im}']+df[f'F_err_{image.freq:.2e}']), color=f'C{i}', alpha=0.4)
+    ax.plot(df['l'], df[f'F_{im_obj.freq:.2e}']*scale, color=f'C{i}', label=im.split('/')[-1])
+    ax.fill_between(df['l'], scale*(df[f'F_{im_obj.freq:.2e}']-df[f'F_err_{im_obj.freq:.2e}']), scale*(df[f'F_{im_obj.freq:.2e}']+df[f'F_err_{im_obj.freq:.2e}']), color=f'C{i}', alpha=0.4)
     ax.set_ylabel('Flux density [Jy]', color=f'C{i}')
 
 ax.legend(loc='best')
-ax.set_xlim([0,df['l'].max])
-plt.savefig(args.out)
+ax.set_xlim([0,df['l'].max()])
+
+log.info(f'Save plot to {args.out}.pdf...')
+plt.savefig(args.out+'.pdf')
