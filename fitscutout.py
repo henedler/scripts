@@ -18,11 +18,10 @@
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 #./fitscutout.py fitsfile [set position and size below]
-position = (1800, 1800) # pixel
-size = (400, 400) # pixel
+position = (100, 500) # pixel
+size = (1000, 1000) # pixel
 
 import os, sys
-import numpy as np
 from astropy.io import fits
 from astropy.nddata import Cutout2D
 from astropy.wcs import WCS
@@ -31,26 +30,7 @@ filename = sys.argv[1]
 
 # Load the image and the WCS
 hdu = fits.open(filename)[0]
-if hdu.header['NAXIS'] == 4:
-    hdu.header['NAXIS'] = 2
-    hdu.header['WCSAXES']=2
-    del hdu.header['NAXIS3']
-    del hdu.header['CTYPE3']
-    del hdu.header['CRVAL3']
-    del hdu.header['CDELT3']
-    del hdu.header['CRPIX3']
-    del hdu.header['CROTA3']
-    del hdu.header['NAXIS4']
-    del hdu.header['CTYPE4']
-    del hdu.header['CRVAL4']
-    del hdu.header['CDELT4']
-    del hdu.header['CRPIX4']
-    del hdu.header['CROTA4']
-
-    hdu.data = np.squeeze(hdu.data)
-
 wcs = WCS(hdu.header)
-
 
 # Make the cutout, including the WCS
 cutout = Cutout2D(hdu.data, position=position, size=size, wcs=wcs)

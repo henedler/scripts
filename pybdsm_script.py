@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Copyright (C) 2019 - Francesco de Gasperin
@@ -26,12 +26,12 @@ try:
 except:
     freq = None
 
-img = bdsf.process_image(f, advanced_opts=True, detection_image=f.replace('-pb',''), interactive=False, thresh_pix=5., thresh_isl=4., \
-        adaptive_rms_box=True, rms_box_bright=(70,10), adaptive_thresh=6., frequency=freq)
+img = bdsf.process_image(f, advanced_opts=True, detection_image=f.replace('int', 'app'), interactive=False, thresh_pix=5., thresh_isl=4., \
+        adaptive_rms_box=True, rms_box=(140,20), rms_box_bright=(70,10), adaptive_thresh=6., frequency=freq)
 img.write_catalog(format='fits',catalog_type='srl', clobber=True)
-#img.write_catalog(format='ds9',catalog_type='srl', clobber=True)
+img.write_catalog(format='ds9',catalog_type='srl', clobber=True)
 #img.write_catalog(format='ds9',catalog_type='gaul', clobber=True)
-#img.export_image(outfile=f+'_gaus_resid.fits', img_type='gaus_resid',clobber=True)
+img.export_image(outfile=f+'_gaus_resid.fits', img_type='gaus_resid',clobber=True)
 #img.export_image(outfile=f+'_gaus_model.fits', img_type='gaus_model',clobber=True)
-#img.export_image(outfile=f+'_rms.fits', img_type='rms',clobber=True)
+img.export_image(outfile=f+'_rms.fits', img_type='rms',clobber=True)
 #img.export_image(outfile=f+'_mean.fits', img_type='mean',clobber=True)

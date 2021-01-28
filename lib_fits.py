@@ -17,7 +17,6 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-
 from astropy.wcs import WCS as pywcs
 from astropy.io import fits as pyfits
 from astropy.cosmology import FlatLambdaCDM
@@ -34,8 +33,8 @@ def flatten(filename, channel=0, freqaxis=0):
     if naxis<2:
         raise RadioError('Can\'t make map from this')
     if naxis==2:
-        pass
-        #return f[0].header,f[0].data
+        #pass
+        return f[0].header,f[0].data
 
     w = pywcs(f[0].header)
     wn = pywcs(naxis=2)
@@ -277,10 +276,10 @@ class Image(object):
         Shift header by dra/ddec
         dra, ddec in degree
         """
-        # correct the dra shift for np.cos(DEC*np.pi/180.) -- only in the log!
+        # correct the dra shift for np.cos(DEC*np.pi/180.) -- only in the log as the reference val doesn't need it!
         logging.info('%s: Shift %.2f %.2f (arcsec)' % (self.imagefile, dra*3600*np.cos(self.dec*np.pi/180.), ddec*3600))
         dec = self.img_hdr['CRVAL2']
-        self.img_hdr['CRVAL1'] += dra/(np.cos(np.pi*dec/180.))
+        self.img_hdr['CRVAL1'] += dra
         self.img_hdr['CRVAL2'] += ddec
 
     def degperpixel(self):

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Copyright (C) 2017 - Francesco de Gasperin
@@ -30,7 +30,7 @@ import pyregion
 from reproject import reproject_interp, reproject_exact
 reproj = reproject_interp
 
-tgss_catalog = '/home/fdg/scripts/TGSSADR1_5sigma_catalog_v3.fits'
+ref_catalog = '/home/fdg/scripts/FIRST_14dec17.fits.gz'
 
 parser = argparse.ArgumentParser(description='Mosaic for LiLF dd-pipeline.')
 parser.add_argument('--images', dest='images', nargs='+', help='List of images to combine')
@@ -97,12 +97,18 @@ class Direction(Image):
         if not os.path.exists(beamfile):
             logging.error('Beam file %s not found.' % beamfile)
             sys.exit(1)
-        logging.debug('%s: set beam file %s' % (self.imagefile, beamfile))
         self.beamfile = beamfile
         self.beam_hdr, self.beam_data = flatten(self.beamfile)
         if self.beam_data.shape != self.img_data.shape:
-            logging.error('Beam and image shape are different.')
-            sys.exit(1)
+            beamfile = self.imagefile+'__beam.fits'
+            logging.warning('Beam and image shape are different, regrid beam...')
+            beam_data, footprint = reproj((self.beam_data, self.beam_hdr), self.img_hdr,
+                                            order='bilinear')  # , parallel=True)
+            # save temp regridded beam
+            pyfits.writeto(beamfile, header=self.img_hdr, data=beam_data, overwrite=True)
+            self.beamfile = beamfile
+            self.beam_hdr, self.beam_data = flatten(self.beamfile)
+        logging.debug('%s: set beam file %s' % (self.imagefile, beamfile))
 
     def apply_beam_cut(self, beamcut=0.3):
         if self.beamfile is None: return
@@ -130,6 +136,8 @@ class Direction(Image):
         from astropy.coordinates import match_coordinates_sky
         from astropy.coordinates import SkyCoord
         import astropy.units as u
+        from scipy.stats import gaussian_kde
+        from astropy.stats import median_absolute_deviation
 
         img_cat = self.imagefile+'.cat'
         if not os.path.exists(img_cat):
@@ -138,27 +146,64 @@ class Direction(Image):
                 adaptive_rms_box=True, adaptive_thresh=100, rms_box_bright=(30,10))
             bdsf_img.write_catalog(outfile=img_cat, catalog_type='srl', format='fits', clobber=True)
 
-        # TODO: add iterations to remove off sources until convergence
-
         # read catlogue
         ref_t = Table.read(ref_cat)
         img_t = Table.read(img_cat)
-
-        # cross match
+        logging.debug('SHIFT: Initial len: %i (ref:%i)' % (len(img_t),len(ref_t)))
+ 
+        # reduce to isolated sources LOFAR
+        idx_match, sep, _ = match_coordinates_sky(SkyCoord(img_t['RA'], img_t['DEC']),\
+                                                  SkyCoord(img_t['RA'], img_t['DEC']), nthneighbor=2)
+    
+        idx_match_img = np.arange(0,len(img_t))[sep>3*self.get_beam()[0]*u.arcsec]
+        img_t = img_t[idx_match_img]
+        # reduce to isolated sources REF
         idx_match, sep, _ = match_coordinates_sky(SkyCoord(ref_t['RA'], ref_t['DEC']),\
-                                                  SkyCoord(img_t['RA'], img_t['DEC']))
-        idx_match_img = idx_match[sep<separation*u.arcsec]
-        idx_match_ref = np.arange(0,len(ref_t))[sep<separation*u.arcsec]
-        
+                                                  SkyCoord(ref_t['RA'], ref_t['DEC']), nthneighbor=2)
+    
+        idx_match_ref = np.arange(0,len(ref_t))[sep>self.get_beam()[0]*u.arcsec]
+        ref_t = ref_t[idx_match_ref]
+        logging.debug('SHIFT: After isaolated sources len: %i (ref:%i)' % (len(img_t),len(ref_t)))
+    
+        # reduce to compact sources
+        img_t = img_t[ (img_t['S_Code'] == 'S') ]
+        img_t = img_t[ (img_t['Total_flux']/img_t['Peak_flux']) < 2 ]
+        ref_t = ref_t[ (ref_t['FINT']/ref_t['FPEAK']) < 1.2 ]
+        logging.debug('SHIFT: After compact source len: %i (ref:%i)' % (len(img_t),len(ref_t)))
+    
+        # cross match
+        idx_match, sep, _ = match_coordinates_sky(SkyCoord(img_t['RA'], img_t['DEC']),\
+                                                  SkyCoord(ref_t['RA'], ref_t['DEC']))
+    
+        sep_mad = median_absolute_deviation(sep[np.where(sep < (3*self.get_beam()[0])*u.deg)])
+        logging.debug('SHIFT: Sep MAD init: %f"' % sep_mad.arcsec)
+        sep_mad_old = 0
+        i = 0
+        while sep_mad != sep_mad_old and not i > 100:
+            sep_mad_old = sep_mad
+            sep_mad = median_absolute_deviation(sep[np.where(sep < 7 * sep_mad)])
+            logging.debug('SHIFT: Sep MAD: %f"' % sep_mad.arcsec)
+            if np.isnan(sep_mad):
+                sys.exit('MAD diverged')
+            i+=1
+    
+        idx_match_ref = idx_match[sep<3*sep_mad]
+        idx_match_img = np.arange(0,len(img_t))[sep<3*sep_mad]
+        img_t = img_t[idx_match_img]
+    
+        logging.debug('SHIFT: After match source len: %i' % len(img_t))
+    
         # find & apply shift
         if len(idx_match) == 0:
-            logging.warning('No match found in TGSS.')
+            logging.warning('No match found in the reference catalogue.')
             return
-        dra = ref_t['RA'][idx_match_ref] - img_t['RA'][idx_match_img]
+
+        ddec = ref_t['DEC'][idx_match_ref] - img_t['DEC']
+        dra = ref_t['RA'][idx_match_ref] - img_t['RA']
         dra[ dra>180 ] -= 360
         dra[ dra<-180 ] += 360
-        ddec = ref_t['DEC'][idx_match_ref] - img_t['DEC'][idx_match_img]
-        self.apply_shift(np.mean(dra), np.mean(ddec))
+
+        self.apply_shift(np.mean(dra), np.mean(ddec)) # ra is in deg on the sphere, no dec correction
 
         # clean up
         if not args.save:
@@ -206,13 +251,10 @@ for i, d in enumerate(directions):
 
     if args.beamcorr: d.apply_beam_corr() # after noise calculation
 
-    #hdu = pyfits.PrimaryHDU(header=d.img_hdr, data=d.img_data)
-    #hdu.writeto(d.imagefile+'-beamcorr', overwrite=True)
-
     d.calc_weight() # after setting: beam, noise, scale
 
     if args.shift:
-        d.calc_shift(tgss_catalog)
+        d.calc_shift(ref_catalog)
 
 
 # prepare header for final gridding
@@ -289,10 +331,9 @@ if args.mask is not None:
         logging.debug('Loading %s...' % outname)
         mask_n = pyfits.open(outname)[0]
     else:
-        mask_n.data, footprint = reproj((mask_n.data, mask_n.header), regrid_hdr, order='nearest-neighbor')#, parallel=True)
+        mask_n.data, footprint = reproj((mask_n.data, mask_n.header), regrid_hdr, order='bilinear')#, parallel=True)
         if args.save:
-            hdu = pyfits.PrimaryHDU(header=regrid_hdr, data=mask_n.data)
-            hdu.writeto(outname, overwrite=True)
+            pyfits.writeto(outname, header=regrid_hdr, data=mask_n.data, overwrite=True)
 
     # get numbers into mask in increasing order
     mask_numbers = sorted(np.unique(mask_n.data))
@@ -309,8 +350,7 @@ for i, d in enumerate(directions):
         r, footprint = reproj((d.img_data, d.img_hdr), regrid_hdr)#, parallel=True)
         r[ np.isnan(r) ] = 0
         if args.save:
-            hdu = pyfits.PrimaryHDU(header=regrid_hdr, data=r)
-            hdu.writeto(outname, overwrite=True)
+            pyfits.writeto(outname, header=regrid_hdr, data=r, overwrite=True)
 
     outname = d.imagefile.replace('.fits','-reprojW.fits')
     if os.path.exists(outname):
@@ -325,8 +365,7 @@ for i, d in enumerate(directions):
         if args.mask is not None:
             w[mask_n.data != mask_numbers[i]] = 0
         if args.save:
-            hdu = pyfits.PrimaryHDU(header=regrid_hdr, data=w)
-            hdu.writeto(outname, overwrite=True)
+            pyfits.writeto(outname, header=regrid_hdr, data=w, overwrite=True)
     logging.debug('Add to mosaic...')
     isum += r*w
     wsum += w
@@ -350,7 +389,6 @@ except:
 regrid_hdr['ORIGIN'] = 'LiLF-pipeline-mosaic'
 regrid_hdr['UNITS'] = 'Jy/beam'
 
-hdu = pyfits.PrimaryHDU(header=regrid_hdr, data=isum)
-hdu.writeto(args.output, overwrite=True)
+pyfits.writeto(args.output, header=regrid_hdr, data=isum, overwrite=True)
 
 logging.debug('Done.')
