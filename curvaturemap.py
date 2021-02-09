@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2017 - Francesco de Gasperin
+# Copyright (C) 2020 - Henrik Edler, Francesco de Gasperin
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -29,29 +29,26 @@ import astropy.units as u
 import pyregion
 # https://github.com/astrofrog/reproject
 from reproject import reproject_interp, reproject_exact
+from spidxmap import ImageSpidx
 reproj = reproject_exact
 logging.root.setLevel(logging.DEBUG)
 
-parser = argparse.ArgumentParser(description='Make spectral index maps, e.g. spidxmap.py --region ds9.reg --noise --sigma 5 --save *fits')
-parser.add_argument('images', nargs='+', help='List of images to use for spidx')
+parser = argparse.ArgumentParser(description='Make spectral index maps, e.g. curvaturemap.py --region ds9.reg --save *fits')
+parser.add_argument('images', nargs='+', help='List of spidxmaps to use for curvature')
 parser.add_argument('--beam', dest='beam', nargs='+', type=float, help='3 parameters final beam to convolve all images (BMAJ (arcsec), BMIN (arcsec), BPA (deg))')
-parser.add_argument('--bgreg', dest='bgreg', help='DS9 region file for background estimation.')
 parser.add_argument('--region', dest='region', help='Ds9 region to restrict analysis')
 parser.add_argument('--size', dest='size', type=float, help='Size (horizontal and vertical) of final image in degree')
 parser.add_argument('--radec', dest='radec', nargs='+', type=float, help='RA/DEC where to center final image in deg (if not given, center on first image)')
-parser.add_argument('--shift', dest='shift', action='store_true', help='Shift images before calculating spidx')
-parser.add_argument('--noise', dest='noise', action='store_true', help='Calculate noise of each image')
 parser.add_argument('--save', dest='save', action='store_true', help='Save intermediate results')
 parser.add_argument('--force', dest='force', action='store_true', help='Force remake intermediate results')
-parser.add_argument('--sigma', dest='sigma', type=float, help='Restrict to pixels above this sigma in all images')
 parser.add_argument('--circbeam', dest='circbeam', action='store_true', help='Force final beam to be circular (default: False, use minimum common beam area)')
-parser.add_argument('--output', dest='output', default='spidx.fits', help='Name of output mosaic (default: spidx.fits)')
+parser.add_argument('--output', dest='output', default='survature.fits', help='Name of output mosaic (default: curvature.fits)')
 
 args = parser.parse_args()
 
 # check input
-if len(args.images) < 2:
-    logging.error('Requires at lest 2 images.')
+if len(args.images) != 2:
+    logging.error('Requires 2 images.')
     sys.exit(1)
 
 if args.beam is not None and len(args.beam) != 3:
@@ -63,39 +60,6 @@ if args.radec is not None and len(args.radec) != 2:
     sys.exit(1)
 
 from lib_fits import Image, find_freq
-class ImageSpidx(Image):
-
-    def __init__(self, imagefile):
-        Image.__init__(self, imagefile)
-
-    def blank_noisy(self, nsigma):
-        """
-        Set to nan pixels below nsigma*noise
-        """
-        nans_before = np.sum(np.isnan(self.img_data))
-        self.img_data[ np.isnan(self.img_data) ] = 0 # temporary set nans to 0 to prevent error in "<"
-        self.img_data[ np.where(self.img_data <= nsigma*image.noise) ] = np.nan
-        nans_after = np.sum(np.isnan(self.img_data))
-        logging.debug('%s: Blanked pixels %i -> %i' % (self.imagefile, nans_before, nans_after))
-        
-    def make_catalogue(self):
-        """
-        Create catalogue for this image
-        """
-        import bdsf
-        from astropy.table import Table
-
-        img_cat = self.imagefile+'.cat'
-        if not os.path.exists(img_cat) and not args.force:
-            bdsf_img = bdsf.process_image(self.imagefile, rms_box=(100,30), \
-                thresh_pix=5, thresh_isl=3, atrous_do=False, \
-                adaptive_rms_box=True, adaptive_thresh=100, rms_box_bright=(30,10), quiet=True)
-            bdsf_img.write_catalog(outfile=img_cat, catalog_type='srl', format='fits', clobber=True)
-        else:
-            logging.warning('%s already exists, using it.' % img_cat)
-
-        self.cat = Table.read(img_cat)
-        logging.debug('%s: Number of sources detected: %i' % (self.imagefile, len(self.cat)) )
 
 
 if __name__ == '__main__':
@@ -107,9 +71,6 @@ if __name__ == '__main__':
         image = ImageSpidx(imagefile)
         all_beams.append(image.get_beam())
         all_images.append(image)
-        if args.shift:
-            image.make_catalogue()
-
     #####################################################
     # find the smallest common beam
     if args.beam is None:
@@ -128,36 +89,6 @@ if __name__ == '__main__':
         % (target_beam[0]*3600., target_beam[1]*3600., target_beam[2]))
 
     #####################################################
-    # find+apply shift w.r.t. first image
-    if args.shift:
-        ref_cat = all_images[0].cat
-        # keep only point sources
-        print(ref_cat)
-        for image in all_images[1:]:
-            # cross match
-            idx_match, sep, _ = match_coordinates_sky(SkyCoord(ref_cat['RA'], ref_cat['DEC']),\
-                                                 SkyCoord(image.cat['RA'], image.cat['DEC']))
-            idx_matched_ref = np.arange(0,len(ref_cat))[sep<target_beam[0]*u.degree]
-            idx_matched_img = idx_match[sep<target_beam[0]*u.degree]
-
-            # find & apply shift
-            if len(idx_match) < 3:
-                logging.warning('%s: Not enough matches found, assume no shift.' % image.imagefile)
-                continue
-
-            dra = ref_cat['RA'][idx_matched_ref] - image.cat['RA'][idx_matched_img]
-            dra[ dra>180 ] -= 360
-            dra[ dra<-180 ] += 360
-            ddec = ref_cat['DEC'][idx_matched_ref] - image.cat['DEC'][idx_matched_img]
-            flux = ref_cat['Peak_flux'][idx_matched_ref]
-            image.apply_shift(np.average(dra, weights=flux), np.average(ddec, weights=flux))
-
-        # clean up
-        #for image in all_images:
-        #    os.system(rm ...)
-
-
-    ######################################################
     # Generate regrid headers
     rwcs = pywcs(naxis=2)
     rwcs.wcs.ctype = all_images[0].get_wcs().wcs.ctype
@@ -165,12 +96,15 @@ if __name__ == '__main__':
     logging.info('Pixel scale: %f"' % (cdelt*3600.))
     rwcs.wcs.cdelt = [-cdelt, cdelt]
     if args.radec is not None:
-        mra = args.radec[0] # *np.pi/180
-        mdec = args.radec[1] # *np.pi/180
+        mra = args.radec[0] #*np.pi/180
+        mdec = args.radec[1] #*np.pi/180
     else:
         mra = all_images[0].img_hdr['CRVAL1']
         mdec = all_images[0].img_hdr['CRVAL2']
     rwcs.wcs.crval = [mra,mdec]
+    # Align image centers:
+    # for image in all_images:
+    #     image.apply_recenter_cutout(mra, mdec)
 
     # if size is not give is taken from the mask
     if args.size is None:
@@ -201,8 +135,10 @@ if __name__ == '__main__':
     regrid_hdr['BMAJ'], regrid_hdr['BMIN'], regrid_hdr['BPA'] = image.get_beam()
     logging.info('Image size: %f deg (%i %i pixels)' % (args.size,xsize,ysize))
 
+    intermediate = pyfits.PrimaryHDU(all_images[1].img_data, all_images[1].img_hdr)
+    intermediate.writeto('test.fits', overwrite=True)
     #########################################################
-    # regrid, convolve and only after apply mask and find noise
+    # regrid, convolve and only after apply mask
     for image in all_images:
 
         if os.path.exists(image.imagefile+'-conv.fits') and not args.force:
@@ -211,7 +147,7 @@ if __name__ == '__main__':
             image.img_hdr = hdr
             image.set_beam([hdr['BMAJ'], hdr['BMIN'], hdr['BPA']])
         else:
-            image.convolve(target_beam)
+            image.convolve(target_beam, stokes=False)
             if args.save:
                 image.write(image.imagefile+'-conv.fits', inflate=True)
 
@@ -225,44 +161,21 @@ if __name__ == '__main__':
             if args.save:
                 image.write(image.imagefile+'-regrid-conv.fits', inflate=True)
 
-        if args.noise:
-            if args.sigma is not None:
-                if args.bgreg:
-                    image.calc_noise(sigma=args.sigma, bg_reg=args.bgreg)  # after mask?/convolution
-                else:
-                    image.calc_noise(sigma=args.sigma)  # after mask?/convolution
-                image.blank_noisy(args.sigma)
-            else:
-                image.calc_noise() # after mask?/convolution
-
         if args.region is not None:
             image.apply_region(args.region, invert=True) # after convolution to minimise bad pixels
 
-
     #########################################################
-    # do spdix and write output
-    frequencies = [ image.freq for image in all_images ]
-    regrid_hdr['FREQLOWER'] = np.min(frequencies)
-    regrid_hdr['FREQUPPER'] = np.max(frequencies)
-    if args.noise: yerr = [ image.noise for image in all_images ]
-    else: yerr = None
-    spidx_data = np.empty(shape=(xsize, ysize))
-    spidx_data[:] = np.nan
-    spidx_err_data = np.empty(shape=(xsize, ysize))
-    spidx_err_data[:] = np.nan
+    # do curvature and write output
+    # frequencies = [ image.freq for image in all_images ]
+    curv_data = np.empty(shape=(xsize, ysize))
+    curv_data[:] = np.nan
+    curv_err_data = np.empty(shape=(xsize, ysize))
+    curv_err_data[:] = np.nan
 
-    for i in range(xsize):
-        print('.', end=' ')
-        sys.stdout.flush()
-        for j in range(ysize):
-            val4reg = [ image.img_data[i,j] for image in all_images ]
-            if np.isnan(val4reg).any(): continue
-            (a, b, sa, sb) = linear_fit_bootstrap(x=frequencies, y=val4reg, yerr=yerr, tolog=True)
-            spidx_data[i,j] = a
-            spidx_err_data[i,j] = sa
+    curv_data = (all_images[0].img_data - all_images[1].img_data)
 
-    spidx = pyfits.PrimaryHDU(spidx_data, regrid_hdr)
-    spidx_err = pyfits.PrimaryHDU(spidx_err_data, regrid_hdr)
-    spidx.writeto(args.output, overwrite=True)
-    spidx_err.writeto(args.output.replace('.fits','-err.fits'), overwrite=True)
+    curv = pyfits.PrimaryHDU(curv_data, regrid_hdr)
+    # curv_err = pyfits.PrimaryHDU(curv_err_data, regrid_hdr)
+    curv.writeto(args.output, overwrite=True)
+    # curv_err.writeto(args.output.replace('.fits','-err.fits'), overwrite=True)
 

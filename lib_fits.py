@@ -17,12 +17,17 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
+import numpy as np
+import os, sys, logging, re
+
 from astropy.wcs import WCS as pywcs
 from astropy.io import fits as pyfits
 from astropy.cosmology import FlatLambdaCDM
+from astropy.nddata import Cutout2D
+import astropy.units as u
 
-import numpy as np
-import os, sys, logging, re
+from reproject import reproject_interp, reproject_exact
+reproj = reproject_exact
 
 def flatten(filename, channel=0, freqaxis=0):
     """ Flatten a fits file so that it becomes a 2D image. Return new header and data """
@@ -112,6 +117,114 @@ def find_freq(header):
 
     return None # no freq information found
  
+class AllImages():
+
+    def __init__(self, filenames):
+        if len(filenames) == 0:
+            logging.error('Cannot find images!')
+            raise ValueError()
+
+        self.filenames = filenames
+        self.images = []
+        for filename in filenames:
+            self.images.append(Image(filename))
+
+
+    def __len__(self):
+        return len(self.images)
+
+
+    def center_at(self, ra, dec):
+        """
+        Re-align all images to a common center
+        Parameters
+        ----------
+        ra: float, Right ascension in deg
+        dec: float, declination in deg
+        """
+        for image in self.images:
+            image.apply_recenter_cutout(ra, dec)
+
+    def convolve_to(self, beam=None, circbeam=False):
+        """
+        Convolve all images to a common beam. By default, convolve to smalles common beam.
+
+        Parameters
+        ----------
+        beam: list, optional. Default = None
+            Beam parameters [b_major, b_minor, b_pa] in deg. None: find smalles common beam
+        circbeam: bool, optional. Default = False
+            Force circular beam
+        """
+
+        if beam is None:
+            if circbeam:
+                maxmaj = np.max([image.get_beam()[0] for image in self.images])
+                target_beam = [maxmaj * 1.01, maxmaj * 1.01, 0.]  # add 1% to prevent crash in convolution
+            else:
+                from radio_beam import Beams
+                my_beams = Beams([image.get_beam()[0] for image in self.images] * u.deg,
+                                 [image.get_beam()[1] for image in self.images] * u.deg,
+                                 [image.get_beam()[2] for image in self.images] * u.deg)
+                common_beam = my_beams.common_beam()
+                target_beam = [common_beam.major.value, common_beam.minor.value, common_beam.pa.value]
+        else:
+            target_beam = [beam[0] / 3600., beam[1] / 3600., beam[2]]
+        logging.info('Final beam: %.1f" %.1f" (pa %.1f deg)' \
+                     % (target_beam[0] * 3600., target_beam[1] * 3600., target_beam[2]))
+
+        for image in self.images:
+            image.convolve(target_beam)
+
+    def regrid_common(self, size=None, pixscale=None, square=True):
+
+        rwcs = pywcs(naxis=2)
+        rwcs.wcs.ctype = self.images[0].get_wcs().wcs.ctype
+        if pixscale:
+            cdelt = pixscale
+        else:
+            cdelt = self.images[0].get_beam()[1] / 5.  # 1/5 of minor axes (deg)
+        logging.info('Pixel scale: %f"' % (cdelt * 3600.))
+        rwcs.wcs.cdelt = [-cdelt, cdelt]
+        mra = self.images[0].img_hdr['CRVAL1']
+        mdec = self.images[0].img_hdr['CRVAL2']
+        rwcs.wcs.crval = [mra, mdec]
+
+        # Calculate sizes of all images to find smalles size that fits all images
+        sizes = np.empty((len(self.images,2)))
+        for i, image in enumerate(self.images):
+            sizes[i] = np.array(image.img_data.shape) * image.degperpixel()
+        if size:
+            size = np.array(size)
+            if np.any(np.min(sizes, axis=1) < size):
+                logging.warning(f'Requested size {size} is larger than smallest image size {np.min(sizes, axis=1)} in at least one dimension. This will result in NaN values in the regridded images.')
+        else:
+            size = np.min(sizes, axis=1)
+            if square:
+                size = np.min(size)
+
+        xsize = int(np.rint(size[0] / cdelt))
+        ysize = int(np.rint(size[-1] / cdelt))
+        if xsize % 2 != 0: xsize += 1
+        if ysize % 2 != 0: ysize += 1
+        rwcs.wcs.crpix = [xsize / 2, ysize / 2]
+
+        regrid_hdr = rwcs.to_header()
+        regrid_hdr['NAXIS'] = 2
+        regrid_hdr['NAXIS1'] = xsize
+        regrid_hdr['NAXIS2'] = ysize
+
+        logging.info('Image size: %f deg (%i %i pixels)' % (size, xsize, ysize))
+        for image in self.images:
+            this_regrid_hdr = regrid_hdr.copy()
+            this_regrid_hdr['BMAJ'], this_regrid_hdr['BMIN'], this_regrid_hdr['BPA'] = image.get_beam()
+            image.regrid(this_regrid_hdr)
+
+    def write(self, suffix):
+        """ Write all (changed) images to imagename-suffix.fits"""
+        for image in self.images:
+            image.write(image.imagefile.replace('.fits', f'-{suffix}.fits'))
+
 
 class Image(object):
 
@@ -149,19 +262,60 @@ class Image(object):
         self.dec = self.img_hdr['CRVAL2']
 
     def write(self, filename=None, inflate=False):
+        """
+        Write to fits-file
+        Parameters
+        ----------
+        filename: str, filename
+        inflate: bool, optional. Default=False
+                If False, write as flat 2D-fits file. If true, inflate to 4D.
+        """
         if filename is None:
             filename = self.imagefile
         if inflate:
-            """ Inflate a fits file so that it becomes a 4D image. Return new header and data """
-            hdr = self.img_hdr
-            hdr_inf = self.img_hdr_orig
-            hdr_inf['CRVAL1'] = hdr['CRVAL1']
-            hdr_inf['CRVAL2'] = hdr['CRVAL2']
-            # hdr_string = f"SIMPLE  =                    T / file does conform to FITS standard             BITPIX  =                  -32 / number of bits per data pixel                  NAXIS   =                    4 / number of data axes                            NAXIS1  =                 {hdr['NAXIS1']} / length of data axis 1                          NAXIS2  =                 {hdr['NAXIS2']} / length of data axis 2                          NAXIS3  =                    1 / length of data axis 3                          NAXIS4  =                    1 / length of data axis 4                          EXTEND  =                    T / FITS dataset may contain extensions            COMMENT   FITS (Flexible Image Transport System) format is defined in 'AstronomyCOMMENT   and Astrophysics', volume 376, page 359; bibcode: 2001A&A...376..359H BSCALE  =                   1.                                                  BZERO   =                   0.                                                  BUNIT   = 'JY/BEAM '           / Units are in Jansky per beam                   BMAJ    =  {hdr['BMAJ']}                                                  BMIN    =  {hdr['BMAJ']}                                                  BPA     =     {hdr['BPA']}                                                  EQUINOX =                2000. / J2000                                          BTYPE   = 'Intensity'                                                           TELESCOP= 'LOFAR   '                                                            OBSERVER= 'unknown '                                                            OBJECT  = 'BEAM_0  '                                                            ORIGIN  = 'WSClean '           / W-stacking imager written by Andre Offringa    CTYPE1  = 'RA---SIN'           / Right ascension angle cosine                   CRPIX1  =                 {hdr['CRPIX1']}                                                 CRVAL1  =          {hdr['CRVAL1']:f}                                                   CDELT1  =             {hdr['CDELT1']:f}                                                 CUNIT1  = 'deg     '                                                            CTYPE2  = 'DEC--SIN'           / Declination angle cosine                       CRPIX2  =                 {hdr['CRPIX2']}                                                 CRVAL2  =     {hdr['CRVAL2']}                                                   CDELT2  =             {hdr['CDELT2']}                                                  CUNIT2  = 'deg     '                                                            CTYPE3  = 'FREQ    '           / Central frequency                              CRPIX3  =                   1.                                                  CRVAL3  =     {find_freq(hdr)}                                                  CDELT3  =            46875000.                                                  CUNIT3  = 'Hz      '                                                            CTYPE4  = 'STOKES  '                                                            CRPIX4  =                   1.                                                  CRVAL4  =                   1.                                                  CDELT4  =                   1.                                                  CUNIT4  = '        '                                                            SPECSYS = 'TOPOCENT' "
-            # hdr_inflated = Header.fromstring(hdr_string)
-            pyfits.writeto(filename, self.img_data[np.newaxis,np.newaxis], hdr_inf, overwrite=True)
+            # Inflate a fits file so that it becomes a 4D image. Return new header and data
+            hdr_inf = pyfits.Header()
+            hdr_inf['SIMPLE'  ] = self.img_hdr_orig['SIMPLE']
+            hdr_inf['BITPIX'  ] = self.img_hdr_orig['BITPIX']
+            hdr_inf['NAXIS'   ] = 4
+            hdr_inf['NAXIS1'  ] = self.img_hdr['NAXIS1']
+            hdr_inf['NAXIS2'  ] = self.img_hdr['NAXIS2']
+            hdr_inf['NAXIS3'  ] = 1
+            hdr_inf['NAXIS4'  ] = 1
+            hdr_inf['EXTEND'  ] = 'T'
+            hdr_inf['BUNIT'   ] = 'JY/BEAM'
+            hdr_inf['RADESYS' ] = 'FK5'
+            hdr_inf['EQUINOX' ] = 2000.
+            hdr_inf['BMAJ'    ] = self.img_hdr['BMAJ']
+            hdr_inf['BMIN'    ] = self.img_hdr['BMIN']
+            hdr_inf['BPA'     ] = self.img_hdr['BPA']
+            hdr_inf['EQUINOX' ] = self.img_hdr_orig['EQUINOX']
+            hdr_inf['BTYPE'   ] = 'INTENSITY'
+            hdr_inf['TELESCOP'] = self.img_hdr_orig['TELESCOP']
+            hdr_inf['OBJECT'  ] = self.img_hdr_orig['OBJECT']
+            hdr_inf['CTYPE1'  ] = self.img_hdr['CTYPE1']
+            hdr_inf['CRPIX1'  ] = self.img_hdr['CRPIX1']
+            hdr_inf['CRVAL1'  ] = self.img_hdr['CRVAL1']
+            hdr_inf['CDELT1'  ] = self.img_hdr['CDELT1']
+            hdr_inf['CUNIT1'  ] = self.img_hdr['CUNIT1']
+            hdr_inf['CTYPE2'  ] = self.img_hdr['CTYPE2']
+            hdr_inf['CRPIX2'  ] = self.img_hdr['CRPIX2']
+            hdr_inf['CRVAL2'  ] = self.img_hdr['CRVAL2']
+            hdr_inf['CDELT2'  ] = self.img_hdr['CDELT2']
+            hdr_inf['CUNIT2'  ] = self.img_hdr['CUNIT2']
+            hdr_inf['CTYPE3'  ] = 'FREQ'
+            hdr_inf['CRPIX3'  ] = 1.
+            hdr_inf['CRVAL3'  ] = self.freq
+            hdr_inf['CDELT3'  ] = 10000000.
+            hdr_inf['CUNIT3'  ] = 'Hz'
+            hdr_inf['CTYPE4'  ] = 'STOKES'
+            hdr_inf['CRPIX4'  ] = 1.
+            hdr_inf['CRVAL4'  ] = 1.
+            hdr_inf['CDELT4'  ] = 1.
+            hdr_inf['CUNIT4'  ] = ' '
+            pyfits.writeto(filename, self.img_data[np.newaxis,np.newaxis], hdr_inf, overwrite=True, output_verify='fix')
         else:
-            pyfits.writeto(filename, self.img_data, self.img_hdr, overwrite=True)
+            pyfits.writeto(filename, self.img_data, self.img_hdr, overwrite=True, output_verify='fix')
 
     def set_beam(self, beam):
         self.img_hdr['BMAJ'] = beam[0]
@@ -241,7 +395,7 @@ class Image(object):
                 oldrms = rms
             raise Exception('Noise estimation failed to converge.')
 
-    def convolve(self, target_beam):
+    def convolve(self, target_beam, stokes=True):
         """
         Convolve *to* this rsolution
         beam = [bmaj, bmin, bpa]
@@ -267,9 +421,21 @@ class Image(object):
         pixsize = abs(self.img_hdr['CDELT1'])
         fwhm2sigma = 1./np.sqrt(8.*np.log(2.))
         gauss_kern = EllipticalGaussian2DKernel((bmaj*fwhm2sigma)/pixsize, (bmin*fwhm2sigma)/pixsize, (90+bpa)*np.pi/180.) # bmaj and bmin are in pixels
-        self.img_data = convolution.convolve(self.img_data, gauss_kern, boundary=None)
-        self.img_data *= (target_beam[0]*target_beam[1])/(beam[0]*beam[1]) # since we are in Jt/b we need to renormalise
+        self.img_data = convolution.convolve(self.img_data, gauss_kern, boundary=None, preserve_nan=True)
+        if stokes: # if not stokes image (e.g. spectral index, do not renormalize)
+            self.img_data *= (target_beam[0]*target_beam[1])/(beam[0]*beam[1]) # since we are in Jt/b we need to renormalise
+
         self.set_beam(target_beam) # update beam
+
+    def regrid(self, regrid_hdr):
+        """ Regrid image to new header """
+        logging.debug('%s: regridding' % (self.imagefile))
+        self.img_data, __footprint = reproj((self.img_data, self.img_hdr), regrid_hdr, parallel=True)
+        beam = self.get_beam()
+        freq = find_freq(self.img_hdr)
+        self.img_hdr = regrid_hdr
+        self.img_hdr['FREQ'] = freq
+        self.set_beam(beam) # retain beam info if not present in regrd_hdr
 
     def apply_shift(self, dra, ddec):
         """
@@ -281,6 +447,28 @@ class Image(object):
         dec = self.img_hdr['CRVAL2']
         self.img_hdr['CRVAL1'] += dra
         self.img_hdr['CRVAL2'] += ddec
+
+    def apply_recenter_cutout(self, ra, dec):
+        """
+        Center the image at ra, dec. The image will be cut accordingly.
+
+        Parameters
+        ----------
+        ra: float, RA in deg.
+        dec: float, Dec in deg.
+        """
+        new_center_pix = self.get_wcs().all_world2pix([[ra, dec]], 0)[0]
+        shape = np.array(np.shape(self.img_data))
+        new_shape = [np.min([shape[0] - new_center_pix[0], new_center_pix[0]]),
+        np.min([shape[1] - new_center_pix[1], new_center_pix[1]])]
+        print(self.get_wcs(), ra, dec)
+        cutout = Cutout2D(self.img_data, new_center_pix, new_shape, wcs = self.get_wcs())
+        hdr = cutout.wcs.to_header()
+        hdr['BMAJ'], hdr['BMIN'], hdr['BPA'] = self.get_beam()
+        self.img_hdr = hdr
+        self.img_data = cutout.data
+        logging.info(f'{self.imagefile}: recenter, size ({shape[0]}, {shape[1]})' \
+                     f' -->  ({new_shape[0]}, {new_shape[1]})')
 
     def degperpixel(self):
         """

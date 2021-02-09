@@ -114,6 +114,7 @@ def interpolate_path(region, image, n, z):
 
 parser = argparse.ArgumentParser(description='Trace a path defined by a points in a ds9 region file. \n    trace_path.py <fits image> <ds9 region>')
 parser.add_argument('region', help='ds9 point regions defining the path, must be ordered from start to end!')
+parser.add_argument('bg', help='Path to ds9 region for background estimation.')
 parser.add_argument('stokesi', nargs='+', default=[], help='List of fits images of Stokes I.')
 parser.add_argument('-z', '--z', default = 0.1259, type=float, help='Source redshift. Defaults to A1033.')
 parser.add_argument('-b', '--beam', default = None, type=float, help='If specified, convolve all images to a circular beam of this radius (deg). Otherwise, convolve to a circular beam with a radius equal to the largest beam major axis.')
@@ -128,10 +129,10 @@ if args.verbose:
 df_list = []
 stokesi = []
 all_beams = []
+all_images = []
 
 for imname in args.stokesi:
-    image = lib_fits.Image(imname)
-    all_beams.append(image.get_beam())
+    all_images.append(lib_fits.Image(imname))
     # my_beams = Beams([b[0] for b in all_beams] * units.deg, [b[1] for b in all_beams] * units.deg,
     #                  [b[2] for b in all_beams] * units.deg)
     # common_beam = my_beams.common_beam()
