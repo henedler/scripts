@@ -20,8 +20,11 @@
 # "nicely" plot the output of image_extractval.py
 
 import sys, os
+import logging as log
 import numpy as np
 import matplotlib.pyplot as plt
+import pyregion
+from scipy import interpolate
 
 
 def f(x, B0, B1):
@@ -283,6 +286,52 @@ def plotlogax(data, plotname):
     print("Writing "+plotname)
     fig.savefig(plotname, bbox_inches='tight')
     del fig
+
+
+def fit_path_to_regions(region, image, z, n):
+    """
+    Fit a path to a number of ds9 point regions.
+    The region file must be ordered!
+
+    Parameters
+    ----------
+    region: string, filename of ds9 region file
+    image: object, lib_fits.Image()
+    z: float, redshift
+    n: int, number of points to sample
+
+    Returns
+    -------
+    xy : (n,2) array of type int
+        Interpolated path in pixel coordinates
+    l: (n,) array of floats
+        Length along the path in kpc
+    """
+    approxres = 1000
+    # Load region, region must be sorted!
+    trace = pyregion.open(region)
+    trace = np.array([p.coord_list for p in trace.as_imagecoord(image.img_hdr)])
+
+    # Linear interpolation
+    distance_lin = np.cumsum(np.linalg.norm(np.diff(trace, axis=0), axis=1))
+    distance_lin = np.insert(distance_lin,0,0)
+    tck, u = interpolate.splprep([trace[:,0], trace[:,1]], u=distance_lin, s=0)
+
+    # Cubic spline interpolation of linear interpolated data to get correct distances
+    # Calculate a lot of points on the spline and then use the accumulated distance from points n to point n+1 as the integrated path
+    xy = interpolate.splev(np.linspace(0,u[-1],approxres), tck, ext=2)
+    distance_cube = np.cumsum(np.linalg.norm(np.diff(xy, axis=1), axis=0))
+    distance_cube = np.insert(distance_cube,0,0)
+    tck, u = interpolate.splprep([xy[0], xy[1]], s=0)
+    length = np.linspace(0, 1, n) # length at point i in fraction
+    xy = np.array(interpolate.splev(length, tck, ext=2)).T # points where we sample in image coords.
+    length = length*distance_cube[-1]/image.get_pixelperkpc(z) # length at point i in kpc
+    log.info(f"Trace consists of {len(trace)} points. Linear interpolation length: {distance_lin[-1]/image.get_pixelperkpc(z):.2f} kpc,  cubic interpolation length: {distance_cube[-1]/image.get_pixelperkpc(z):.2f} kpc")
+    if not np.all(np.isclose([trace[0], trace[-1]], [xy[0], xy[-1]])):  # Assert
+        raise ValueError(f'Check points: First diff - {trace[0] - xy[0]}; last diff = {trace[-1] - xy[-1]}')
+    return xy, length
+
+
 
 if __name__ == "__main__":
     import optparse

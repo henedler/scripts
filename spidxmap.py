@@ -68,34 +68,6 @@ class ImageSpidx(Image):
     def __init__(self, imagefile):
         Image.__init__(self, imagefile)
 
-    def blank_noisy(self, nsigma):
-        """
-        Set to nan pixels below nsigma*noise
-        """
-        nans_before = np.sum(np.isnan(self.img_data))
-        self.img_data[ np.isnan(self.img_data) ] = 0 # temporary set nans to 0 to prevent error in "<"
-        self.img_data[ np.where(self.img_data <= nsigma*image.noise) ] = np.nan
-        nans_after = np.sum(np.isnan(self.img_data))
-        logging.debug('%s: Blanked pixels %i -> %i' % (self.imagefile, nans_before, nans_after))
-        
-    def make_catalogue(self):
-        """
-        Create catalogue for this image
-        """
-        import bdsf
-        from astropy.table import Table
-
-        img_cat = self.imagefile+'.cat'
-        if not os.path.exists(img_cat) and not args.force:
-            bdsf_img = bdsf.process_image(self.imagefile, rms_box=(100,30), \
-                thresh_pix=5, thresh_isl=3, atrous_do=False, \
-                adaptive_rms_box=True, adaptive_thresh=100, rms_box_bright=(30,10), quiet=True)
-            bdsf_img.write_catalog(outfile=img_cat, catalog_type='srl', format='fits', clobber=True)
-        else:
-            logging.warning('%s already exists, using it.' % img_cat)
-
-        self.cat = Table.read(img_cat)
-        logging.debug('%s: Number of sources detected: %i' % (self.imagefile, len(self.cat)) )
 
 
 if __name__ == '__main__':
